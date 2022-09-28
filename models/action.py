@@ -21,6 +21,8 @@ class Action(nn.Module):
         self.sigmoid = nn.Sigmoid()
         self.fold = self.in_channels // shift_div
 
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
         # shifting
         self.action_shift = nn.Conv1d(
                                     self.in_channels, self.in_channels,
@@ -56,6 +58,20 @@ class Action(nn.Module):
         self.action_p3_conv1 = nn.Conv2d(self.reduced_channels, self.reduced_channels, kernel_size=(3, 3), 
                                     stride=(1 ,1), bias=False, padding=(1, 1), groups=self.reduced_channels)
         self.action_p3_expand = nn.Conv2d(self.reduced_channels, self.in_channels, kernel_size=(1, 1), stride=(1 ,1), bias=False, padding=(0, 0))
+
+        """Added by Haotian Qi"""
+        # # position excitation (PE)
+        # 1. x pooling y pooling, concat then send to 1x1 Conv
+        # 2. Split into 2x Conv for one W and H
+        self.action_p4_squeeze = nn.Conv2d(self.in_channels, self.reduced_channels, kernel_size=(1, 1), stride=(1 ,1), bias=False, padding=(0, 0))
+        self.actoin_p4_conv1 = nn.Conv2d(self.reduced_channels, self.reduced_channels, kernel_size=1, stride=1, bias=False, padding=0)
+        self.action_p4_bn1 = nn.BatchNorm2d(self.reduced_channels)
+   
+
+        self.action_p4_h = nn.Conv2d(self.reduced_channels, self.reduced_channels, kernel_size=1, stride=1, padding=0)
+        self.action_p4_w = nn.Conv2d(self.reduced_channels, self.reduced_channels, kernel_size=1, stride=1, padding=0)
+        self.action_p4_expand = nn.Conv2d(self.reduced_channels, self.in_channels, kernel_size=(1, 1), stride=(1 ,1), bias=False, padding=(0, 0))
+        """"""
         print('=> Using ACTION')
 
 
@@ -110,7 +126,36 @@ class Action(nn.Module):
         x_p3 = self.sigmoid(x_p3)
         x_p3 = x_shift * x_p3 + x_shift
 
-        out = self.net(x_p1 + x_p2 + x_p3)
+        """Added by Haotian Qi"""
+        # # 2D convolution: positional excitation
+        nt, c, h, w = x.size()
+        x4_h = self.pool_h(x_shift)
+        x4_w = self.pool_w(x_shift)
+   
+        x4_h = self.action_p4_squeeze(x4_h)
+        x4_w = self.action_p4_squeeze(x4_w).permute(0,1,3,2)
+
+        y = torch.cat([x4_h, x4_w], dim=2)
+
+        y = self.actoin_p4_conv1(y)
+        y = self.action_p4_bn1(y)
+        y = self.relu(y)
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute([0, 1, 3, 2])
+
+        x_h = self.action_p4_h(x_h)
+        x_w = self.action_p4_w(x_w)
+
+        x_h = self.action_p4_expand(x_h)
+        x_w = self.action_p4_expand(x_w)
+
+        x_h = self.sigmoid(x_h)
+        x_w = self.sigmoid(x_w)
+
+        x_p4 = x_shift * x_h * x_w + x_shift
+        """"""
+        # Added x_p4
+        out = self.net(x_p1 + x_p2 + +x_p3 + x_p4)
         return out
 
 
@@ -157,7 +202,7 @@ def make_temporal_shift(net, n_segment, n_div=8, place='blockres', temporal_pool
                     blocks[i].conv1 = Action(b.conv1, n_segment=this_segment, shift_div = n_div)
                 return nn.Sequential(*(blocks))
 
-            pdb.set_trace()
+            # pdb.set_trace()
             net.layer1 = make_block_temporal(net.layer1, n_segment_list[0])
             net.layer2 = make_block_temporal(net.layer2, n_segment_list[1])
             net.layer3 = make_block_temporal(net.layer3, n_segment_list[2])
